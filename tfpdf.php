@@ -491,7 +491,7 @@ function AddFont($family, $style='', $file='', $uni=false)
 		}
 		if (!isset($type) ||  !isset($name) || $originalsize != $ttfstat['size']) {
 			$ttffile = $ttffilename;
-//			require_once($this->fontpath.'unifont/ttfonts.php');
+			require_once($this->fontpath.'unifont/ttfonts.php');
 			$ttf = new TTFontFile();
 			$ttf->getMetrics($ttffile);
 			$cw = $ttf->charWidths;
@@ -532,7 +532,7 @@ function AddFont($family, $style='', $file='', $uni=false)
 			unset($ttf);
 		}
 		else {
-			$cw = @file_get_contents($unifilename.'.cw.dat'); 
+			$cw = @file_get_contents($unifilename.'.cw.dat');
 		}
 		$i = count($this->fonts)+1;
 		if(!empty($this->AliasNbPages))
@@ -660,7 +660,7 @@ function Text($x, $y, $txt)
 		foreach($this->UTF8StringToArray($txt) as $uni)
 			$this->CurrentFont['subset'][$uni] = $uni;
 	}
-	else 
+	else
 		$txt2 = '('.$this->_escape($txt).')';
 	$s = sprintf('BT %.2F %.2F Td %s Tj ET',$x*$this->k,($this->h-$y)*$this->k,$txt2);
 	if($this->underline && $txt!='')
@@ -934,6 +934,226 @@ function MultiCell($w, $h, $txt, $border=0, $align='J', $fill=false)
 	else {
 		$this->Cell($w,$h,substr($s,$j,$i-$j),$b,2,$align,$fill);
 	}
+	$this->x = $this->lMargin;
+}
+
+/**
+ * _mcRowWrapLines - uso interno.
+ * Esegue il word-wrap di un testo esattamente come farebbe MultiCell
+ * e restituisce un array di stringhe (una per riga stampata).
+ */
+protected function _mcRowWrapLines($w, $txt)
+{
+	$cw   = $this->CurrentFont['cw'];
+	$wmax = $w - 2 * $this->cMargin;
+
+	$s  = str_replace("\r", '', (string)$txt);
+	if($this->unifontSubset) {
+		$nb = mb_strlen($s, 'utf-8');
+		while($nb > 0 && mb_substr($s, $nb-1, 1, 'utf-8') == "\n") $nb--;
+	} else {
+		$nb = strlen($s);
+		if($nb > 0 && $s[$nb-1] == "\n") $nb--;
+	}
+
+	$lines = array();
+	$sep   = -1;
+	$i = $j = 0;
+	$l = $ls = $ns = 0;
+
+	while($i < $nb)
+	{
+		$c = $this->unifontSubset ? mb_substr($s, $i, 1, 'UTF-8') : $s[$i];
+
+		if($c == "\n")
+		{
+			$lines[] = $this->unifontSubset
+				? mb_substr($s, $j, $i-$j, 'UTF-8')
+				: substr($s, $j, $i-$j);
+			$i++; $sep=-1; $j=$i; $l=0; $ns=0;
+			continue;
+		}
+		if($c == ' ') { $sep=$i; $ls=$l; $ns++; }
+
+		$l += $this->unifontSubset
+			? $this->GetStringWidth($c)
+			: $cw[$c] * $this->FontSize / 1000;
+
+		if($l > $wmax)
+		{
+			if($sep == -1) {
+				if($i == $j) $i++;
+				$lines[] = $this->unifontSubset
+					? mb_substr($s, $j, $i-$j, 'UTF-8')
+					: substr($s, $j, $i-$j);
+			} else {
+				$lines[] = $this->unifontSubset
+					? mb_substr($s, $j, $sep-$j, 'UTF-8')
+					: substr($s, $j, $sep-$j);
+				$i = $sep + 1;
+			}
+			$sep=-1; $j=$i; $l=0; $ns=0;
+		}
+		else
+			$i++;
+	}
+	// Ultima riga
+	$lines[] = $this->unifontSubset
+		? mb_substr($s, $j, $i-$j, 'UTF-8')
+		: substr($s, $j, $i-$j);
+
+	return $lines;
+}
+
+/**
+ * MultiCellRow - stampa una riga di tabella con N colonne, spezzando
+ * fisicamente il contenuto tra una pagina e l'altra riga per riga di testo,
+ * esattamente come farebbe MultiCell ma coordinando tutte le colonne insieme.
+ *
+ * Quando il contenuto di una (o più) colonne supera il fondo pagina, viene
+ * eseguito AddPage() e la stampa continua sulla nuova pagina mantenendo
+ * l'allineamento delle colonne. Non viene mai triggerato un AddPage() implicito
+ * dentro Cell/MultiCell (causa del font corrotto).
+ *
+ * @param array $widths   Larghezze delle colonne, es. [40, 60, 50, 40]
+ * @param float $h        Altezza di ogni singola riga di testo
+ * @param array $texts    Testi delle celle
+ * @param mixed $borders  Bordo: intero o stringa LTRB, uguale per tutte le colonne
+ *                        oppure array con un valore per colonna.
+ *                        Con border=1 (rettangolo), gestisce automaticamente
+ *                        T solo alla prima riga e B solo all'ultima.
+ * @param mixed $aligns   Allineamento ('L','C','R','J') uguale o array per colonna
+ * @param mixed $fills    Fill (bool) uguale o array per colonna
+ * @param float $startX   X di partenza (0 = margine sinistro corrente)
+ *
+ * Esempio:
+ *   $pdf->MultiCellRow(
+ *       [40, 60, 50, 40],
+ *       6,
+ *       ['Voce', 'Descrizione molto lunga che va a capo e magari anche in pagina nuova', 'Qty', 'EUR'],
+ *       1, 'L', false
+ *   );
+ */
+function MultiCellRow($widths, $h, $texts, $borders=0, $aligns='L', $fills=false, $startX=0, $styles='')
+{
+	if(!isset($this->CurrentFont))
+		$this->Error('No font has been set');
+
+	$ncols = count($widths);
+	if($startX <= 0) $startX = $this->lMargin;
+
+	// Normalizza borders, aligns, fills, styles in array per colonna
+	$bordersArr = is_array($borders) ? $borders : array_fill(0, $ncols, $borders);
+	$alignsArr  = is_array($aligns)  ? $aligns  : array_fill(0, $ncols, $aligns);
+	$fillsArr   = is_array($fills)   ? $fills   : array_fill(0, $ncols, $fills);
+	$stylesArr  = is_array($styles)  ? $styles  : array_fill(0, $ncols, $styles);
+
+	// Salva font corrente per poterlo ripristinare
+	$savedFamily = $this->FontFamily;
+	$savedStyle  = $this->FontStyle.($this->underline ? 'U' : '');
+	$savedSizePt = $this->FontSizePt;
+
+	// --- Word-wrap di tutte le colonne ---
+	// Il wrap deve tenere conto dello stile (bold cambia le larghezze dei caratteri),
+	// quindi per ogni colonna impostiamo temporaneamente il font prima di wrappare.
+	$wrappedCols = array();
+	$totalLines  = 0;
+	for($c = 0; $c < $ncols; $c++) {
+		$colStyle = strtoupper($stylesArr[$c]);
+		if($colStyle !== $savedStyle)
+			$this->SetFont($savedFamily, $colStyle, $savedSizePt);
+		$wrappedCols[$c] = $this->_mcRowWrapLines($widths[$c], isset($texts[$c]) ? $texts[$c] : '');
+		$totalLines = max($totalLines, count($wrappedCols[$c]));
+	}
+	// Ripristina font base dopo il wrap
+	$this->SetFont($savedFamily, $savedStyle, $savedSizePt);
+
+	// Pareggia tutte le colonne alla stessa lunghezza con righe vuote
+	for($c = 0; $c < $ncols; $c++) {
+		while(count($wrappedCols[$c]) < $totalLines)
+			$wrappedCols[$c][] = '';
+	}
+
+	// --- Prepara i bordi per ogni colonna ---
+	$bFirst = array();
+	$bMid   = array();
+	$bLast  = array();
+	for($c = 0; $c < $ncols; $c++) {
+		$border = $bordersArr[$c];
+		if($border) {
+			if($border == 1) {
+				$bFirst[$c] = 'LRT';
+				$bMid[$c]   = 'LR';
+				$bLast[$c]  = 'LRB';
+			} else {
+				$b2 = '';
+				if(strpos($border,'L')!==false) $b2 .= 'L';
+				if(strpos($border,'R')!==false) $b2 .= 'R';
+				$bFirst[$c] = (strpos($border,'T')!==false) ? $b2.'T' : $b2;
+				$bMid[$c]   = $b2;
+				$bLast[$c]  = (strpos($border,'B')!==false) ? $b2.'B' : $b2;
+			}
+		} else {
+			$bFirst[$c] = $bMid[$c] = $bLast[$c] = 0;
+		}
+	}
+	// Se c'è solo una riga, first=last
+	if($totalLines == 1) {
+		for($c = 0; $c < $ncols; $c++)
+			$bFirst[$c] = isset($bLast[$c]) ? ($bFirst[$c] . (strpos((string)$bLast[$c],'B')!==false ? 'B':'')) : $bFirst[$c];
+	}
+
+	// Disabilita il page-break automatico: lo gestiamo noi
+	$savedAuto    = $this->AutoPageBreak;
+	$savedTrigger = $this->PageBreakTrigger;
+	$this->SetAutoPageBreak(false);
+
+	// --- Stampa riga per riga di testo ---
+	for($line = 0; $line < $totalLines; $line++)
+	{
+		// Controlla se questa riga di testo sfora il fondo pagina
+		if($this->y + $h > $savedTrigger && !$this->InHeader && !$this->InFooter && $savedAuto)
+		{
+			$this->AutoPageBreak    = $savedAuto;
+			$this->PageBreakTrigger = $savedTrigger;
+			$this->AddPage($this->CurOrientation, $this->CurPageSize, $this->CurRotation);
+			$this->SetAutoPageBreak(false);
+		}
+
+		$curX = $startX;
+		$rowY = $this->y;
+
+		for($c = 0; $c < $ncols; $c++)
+		{
+			// Imposta lo stile della colonna
+			$colStyle = strtoupper($stylesArr[$c]);
+			if($colStyle !== $this->FontStyle.($this->underline ? 'U' : ''))
+				$this->SetFont($savedFamily, $colStyle, $savedSizePt);
+
+			// Determina il bordo per questa riga di testo in questa colonna
+			if($totalLines == 1)
+				$cellBorder = $bordersArr[$c] == 1 ? 'LTRB' : $bordersArr[$c];
+			elseif($line == 0)
+				$cellBorder = $bFirst[$c];
+			elseif($line == $totalLines - 1)
+				$cellBorder = $bLast[$c];
+			else
+				$cellBorder = $bMid[$c];
+
+			$this->SetXY($curX, $rowY);
+			$this->Cell($widths[$c], $h, $wrappedCols[$c][$line], $cellBorder, 0, $alignsArr[$c], $fillsArr[$c]);
+
+			$curX += $widths[$c];
+		}
+
+		// Avanza Y di una riga di testo
+		$this->SetY($rowY + $h);
+	}
+
+	// Ripristina font base, page-break automatico e X al margine sinistro
+	$this->SetFont($savedFamily, $savedStyle, $savedSizePt);
+	$this->AutoPageBreak    = $savedAuto;
+	$this->PageBreakTrigger = $savedTrigger;
 	$this->x = $this->lMargin;
 }
 
@@ -1889,7 +2109,7 @@ protected function _putfonts()
 		// TrueType embedded SUBSETS or FULL
 		else if ($type=='TTF') {
 			$this->fonts[$k]['n']=$this->n+1;
-//			require_once($this->fontpath.'unifont/ttfonts.php');
+			require_once($this->fontpath.'unifont/ttfonts.php');
 			$ttf = new TTFontFile();
 			$fontname = 'MPDFAA'.'+'.$font['name'];
 			$subset = $font['subset'];
@@ -1906,7 +2126,7 @@ protected function _putfonts()
 			$this->_put('<</Type /Font');
 			$this->_put('/Subtype /Type0');
 			$this->_put('/BaseFont /'.$fontname.'');
-			$this->_put('/Encoding /Identity-H'); 
+			$this->_put('/Encoding /Identity-H');
 			$this->_put('/DescendantFonts ['.($this->n + 1).' 0 R]');
 			$this->_put('/ToUnicode '.($this->n + 2).' 0 R');
 			$this->_put('>>');
@@ -1918,10 +2138,10 @@ protected function _putfonts()
 			$this->_put('<</Type /Font');
 			$this->_put('/Subtype /CIDFontType2');
 			$this->_put('/BaseFont /'.$fontname.'');
-			$this->_put('/CIDSystemInfo '.($this->n + 2).' 0 R'); 
+			$this->_put('/CIDSystemInfo '.($this->n + 2).' 0 R');
 			$this->_put('/FontDescriptor '.($this->n + 3).' 0 R');
 			if (isset($font['desc']['MissingWidth'])){
-				$this->_out('/DW '.$font['desc']['MissingWidth'].''); 
+				$this->_out('/DW '.$font['desc']['MissingWidth'].'');
 			}
 
 			$this->_putTTfontwidths($font, $ttf->maxUni);
@@ -1958,7 +2178,7 @@ protected function _putfonts()
 
 			// CIDSystemInfo dictionary
 			$this->_newobj();
-			$this->_put('<</Registry (Adobe)'); 
+			$this->_put('<</Registry (Adobe)');
 			$this->_put('/Ordering (UCS)');
 			$this->_put('/Supplement 0');
 			$this->_put('>>');
@@ -1992,7 +2212,7 @@ protected function _putfonts()
 			$this->_putstream($cidtogidmap);
 			$this->_put('endobj');
 
-			//Font file 
+			//Font file
 			$this->_newobj();
 			$this->_put('<</Length '.strlen($fontstream));
 			$this->_put('/Filter /FlateDecode');
@@ -2001,7 +2221,7 @@ protected function _putfonts()
 			$this->_putstream($fontstream);
 			$this->_put('endobj');
 			unset($ttf);
-		} 
+		}
 		else
 		{
 			// Allow for additional types
@@ -2027,7 +2247,7 @@ protected function _putTTfontwidths($font, $maxUni) {
 		$interval = false;
 		$startcid = 1;
 	}
-	$cwlen = $maxUni + 1; 
+	$cwlen = $maxUni + 1;
 
 	// for each character
 	for ($cid=$startcid; $cid<$cwlen; $cid++) {
@@ -2046,7 +2266,7 @@ protected function _putTTfontwidths($font, $maxUni) {
 				fclose($fh);
 			}
 		}
-		if ((!isset($font['cw'][$cid*2]) || !isset($font['cw'][$cid*2+1])) || 
+		if ((!isset($font['cw'][$cid*2]) || !isset($font['cw'][$cid*2+1])) ||
                     ($font['cw'][$cid*2] == "\00" && $font['cw'][$cid*2+1] == "\00")) { continue; }
 
 		$width = (ord($font['cw'][$cid*2]) << 8) + ord($font['cw'][$cid*2+1]);
