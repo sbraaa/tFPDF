@@ -1025,6 +1025,7 @@ protected function _mcRowWrapLines($w, $txt)
  * @param mixed $aligns   Allineamento ('L','C','R','J') uguale o array per colonna
  * @param mixed $fills    Fill (bool) uguale o array per colonna
  * @param float $startX   X di partenza (0 = margine sinistro corrente)
+ * @param mixed $styles   stile font ('','B','I','U') uguale o array per colonna
  *
  * Esempio:
  *   $pdf->MultiCellRow(
@@ -1897,24 +1898,26 @@ protected function _putstreamobject($data)
 
 protected function _putlinks($n)
 {
-	foreach($this->PageLinks[$n] as $pl)
-	{
-		$this->_newobj();
-		$rect = sprintf('%.2F %.2F %.2F %.2F',$pl[0],$pl[1],$pl[0]+$pl[2],$pl[1]-$pl[3]);
-		$s = '<</Type /Annot /Subtype /Link /Rect ['.$rect.'] /Border [0 0 0] ';
-		if(is_string($pl[4]))
-			$s .= '/A <</S /URI /URI '.$this->_textstring($pl[4]).'>>>>';
-		else
+	if(!empty($this->PageLinks[$n])) {
+		foreach($this->PageLinks[$n] as $pl)
 		{
-			$l = $this->links[$pl[4]];
-			if(isset($this->PageInfo[$l[0]]['size']))
-				$h = $this->PageInfo[$l[0]]['size'][1];
+			$this->_newobj();
+			$rect = sprintf('%.2F %.2F %.2F %.2F',$pl[0],$pl[1],$pl[0]+$pl[2],$pl[1]-$pl[3]);
+			$s = '<</Type /Annot /Subtype /Link /Rect ['.$rect.'] /Border [0 0 0] ';
+			if(is_string($pl[4]))
+				$s .= '/A <</S /URI /URI '.$this->_textstring($pl[4]).'>>>>';
 			else
-				$h = ($this->DefOrientation=='P') ? $this->DefPageSize[1]*$this->k : $this->DefPageSize[0]*$this->k;
-			$s .= sprintf('/Dest [%d 0 R /XYZ 0 %.2F null]>>',$this->PageInfo[$l[0]]['n'],$h-$l[1]*$this->k);
+			{
+				$l = $this->links[$pl[4]];
+				if(isset($this->PageInfo[$l[0]]['size']))
+					$h = $this->PageInfo[$l[0]]['size'][1];
+				else
+					$h = ($this->DefOrientation=='P') ? $this->DefPageSize[1]*$this->k : $this->DefPageSize[0]*$this->k;
+				$s .= sprintf('/Dest [%d 0 R /XYZ 0 %.2F null]>>',$this->PageInfo[$l[0]]['n'],$h-$l[1]*$this->k);
+			}
+			$this->_put($s);
+			$this->_put('endobj');
 		}
-		$this->_put($s);
-		$this->_put('endobj');
 	}
 }
 
@@ -1961,8 +1964,10 @@ protected function _putpages()
 	{
 		$this->PageInfo[$i]['n'] = ++$n;
 		$n++;
-		foreach($this->PageLinks[$i] as &$pl)
-			$pl[5] = ++$n;
+		if(!empty($this->PageLinks[$n])) {
+			foreach($this->PageLinks[$i] as &$pl)
+				$pl[5] = ++$n;
+		}
 		unset($pl);
 	}
 	for($i=1;$i<=$nb;$i++)
